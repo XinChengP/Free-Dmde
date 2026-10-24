@@ -259,7 +259,7 @@ class DMDE:
                 continue
             # 4) 重名/错误对话框: 单选框选择 + OK 确认
             choice = None
-            for pref in ('Skip all', 'Ignore all', '跳过全部', 'Skip', 'Ignore', '跳过', '忽略'):
+            for pref in ('Skip all', 'Ignore all', '全部跳过', '跳过全部', 'Skip', 'Ignore', '跳过', '忽略'):
                 if pref in btns:
                     choice = (pref, btns[pref])
                     break
@@ -645,24 +645,30 @@ class DMDE:
 
     # ---------------- 恢复 ----------------
     def open_recover_dialog(self):
-        rec = None
-        for b in self.main.descendants(class_name='Button'):
-            t = b.window_text() or ''
-            if 'Recover' in t or t.startswith('恢复'):
-                rec = b
-                break
-        if rec is None or not rec.is_enabled():
-            raise RuntimeError('Recover 按钮不可用 (可能没有已标记条目)')
-        rec.click_input()
-        t0 = time.time()
-        while time.time() - t0 < 20:
-            w = self.top()
-            if w is not None and w.class_name() == '#32770':
-                if RE_RD_TITLE.fullmatch(w.window_text() or ''):
-                    return w
-                self.pump(max_rounds=3)
-            time.sleep(0.5)
-        raise RuntimeError("恢复对话框未出现")
+        last_err = '未尝试'
+        for attempt in range(3):
+            self.pump(max_rounds=4)   # 先清掉遗留弹窗
+            rec = None
+            for b in self.main.descendants(class_name='Button'):
+                t = b.window_text() or ''
+                if ('Recover' in t or t.startswith('恢复'))                         and b.is_visible() and b.is_enabled():
+                    rec = b
+                    break
+            if rec is None:
+                time.sleep(1.5)
+                last_err = 'Recover 按钮不可见/不可用'
+                continue
+            rec.click_input()
+            t0 = time.time()
+            while time.time() - t0 < 12:
+                w = self.top()
+                if w is not None and w.class_name() == '#32770':
+                    if RE_RD_TITLE.fullmatch(w.window_text() or ''):
+                        return w
+                    self.pump(max_rounds=3)
+                time.sleep(0.4)
+            last_err = '点击后面板对话框未出现'
+        raise RuntimeError('恢复对话框未出现 (%s)' % last_err)
 
     def find_recover_dlg(self, timeout=15):
         t0 = time.time()
