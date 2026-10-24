@@ -1,0 +1,29 @@
+# ===== 隐私与版权: 以下内容一律不入库 =====
+# DMDE 程序本体与配置 (专有软件, 内含本机配置)
+dmde/
+
+# 恢复输出 / 测试产物 (含真实恢复文件名)
+rec_out*/
+freedmde_scan*/
+freedmde_train/
+_tmp_*/
+
+# 运行状态与日志
+_dmde_auto.log
+_dmde_auto_state.json
+_gui_settings.json
+my_dmde.pid
+*_status.txt
+probe/
+
+# 测试镜像与反编译文档
+testimg64*
+*.img
+*.manifest.json
+chm_html/
+__pycache__/
+
+# 训练/探测专用脚本 (含本机路径)
+tools/*
+!tools/mkfat32.py
+!tools/verify_e2e.py
