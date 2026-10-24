@@ -479,10 +479,11 @@ class DMDE:
         except Exception:
             return ''
 
-    def is_dir_row(self, right, idx, name, img):
+    def is_dir_row(self, right, idx, name, img, v1=None):
         if name.startswith('[..]') or name.startswith('$'):
             return True
-        v1 = self.sub_text(right, idx, 1)      # 尺寸列: 目录显示 [directory]
+        if v1 is None:
+            v1 = self.sub_text(right, idx, 1)   # 尺寸列: 目录显示 [directory]
         if 'directory' in v1 or '目录' in v1:
             return True
         v4 = self.sub_text(right, idx, 4)      # 属性列: D 开头 = 目录
@@ -703,9 +704,30 @@ class DMDE:
             self.r.log('警告: 路径回读不一致! 回读=%r 期望=%r' % (got, dest))
             raise RuntimeError('目标路径设置失败')
 
+    def ensure_deleted_category(self, dlg):
+        """在恢复对话框中勾选"已删除"类别 (损坏盘恢复必需)。仅在能可靠读取状态时操作。"""
+        try:
+            for b in dlg.descendants(class_name='Button'):
+                t = b.window_text() or ''
+                if t in ('已删除', 'deleted', '已删除文件'):
+                    style = ctypes.windll.user32.GetWindowLongW(b.handle, 0xFFF0) & 0xF
+                    if style not in (0x2, 0x6, 0x9, 0x10):   # 非标准复选框 -> 不碰
+                        self.r.log('  类别"已删除"为自绘控件, 跳过自动勾选 (请手动确认)')
+                        return
+                    st = b.get_check_state()
+                    if st in (0, None):
+                        b.click_input()
+                        self.r.log('  -> 已勾选类别"已删除"')
+                    else:
+                        self.r.log('  类别"已删除"已勾选')
+                    return
+        except Exception as e:
+            self.r.log('  勾选"已删除"失败 (忽略): %s' % e)
+
     def run_recovery(self, dest):
         rd = self.open_recover_dialog()
         self.set_destination(rd, dest)
+        self.ensure_deleted_category(rd)
         rd.child_window(control_id=1, class_name='Button').click_input()
         self.r.log('恢复已启动...')
         stats = None
@@ -727,6 +749,7 @@ class DMDE:
                     for _ in range(20):
                         try:
                             w2 = self.top()
+                            self.ensure_deleted_category(w2)
                             b = w2.child_window(control_id=1, class_name='Button')
                             if b.exists(timeout=0.5) and b.is_enabled() and b.is_visible():
                                 b.click_input()
@@ -849,17 +872,27 @@ class DMDE:
         except Exception:
             return 0
 
-    def _recover_folder_files(self, file_rows, dest, fstate, relpath):
-        """对 file_rows 分批标记并恢复 (断点推进在此处)。"""
+    def _recover_folder_files(self, dest, fstate, relpath):
+        """分批标记并恢复当前面板中的文件 (断点推进在此处)。每批前重新分类面板行。"""
         r = self.r
         chunk = r.args.chunk
-        while fstate.get('rows_done', 0) < len(file_rows):
+        while True:
+            rows, right = self.rows()
+            file_rows = []
+            for idx, name, st, img, subs in rows:
+                if name.startswith('[..]'):
+                    continue
+                if not self.is_dir_row(right, idx, name, img, v1=(subs[0] if subs else None)):
+                    file_rows.append(idx)
+            done_n = fstate.get('rows_done', 0)
+            if done_n >= len(file_rows):
+                break
             if r.cancelled():
                 raise Cancelled('用户停止 (断点已保存)')
             mb = getattr(r.args, 'max_batches', 0) or 0
             if mb and r.stats['batches'] >= mb:
                 raise Cancelled('训练模式: 已完成 %d 批, 自动停止 (断点已保存, 取消限制可继续)' % mb)
-            start = fstate.get('rows_done', 0)
+            start = done_n
             if start > 0:
                 self.unmark_all()   # 只有续传到一半才可能有残留标记
             cnt = min(chunk, len(file_rows) - start)
@@ -927,7 +960,7 @@ class DMDE:
 
             if file_rows and not r.args.list_only:
                 os.makedirs(dest, exist_ok=True)
-                self._recover_folder_files(file_rows, dest, fstate, relpath)
+                self._recover_folder_files(dest, fstate, relpath)
                 # 自愈: 磁盘直连文件数 < 面板文件数 => 有批次曾被中止, 重做一次
                 direct = self._count_direct_files(dest)
                 if direct < len(file_rows) and not fstate.get('retried'):
@@ -936,7 +969,7 @@ class DMDE:
                     r.save_state()
                     r.log('警告: 磁盘文件数(%d) < 面板文件数(%d), 自动重做本目录 (重名文件自动跳过)'
                           % (direct, len(file_rows)))
-                    self._recover_folder_files(file_rows, dest, fstate, relpath)
+                    self._recover_folder_files(dest, fstate, relpath)
             elif file_rows:
                 r.log('  (list-only) 将恢复 %d 个文件 -> %s' % (len(file_rows), dest))
                 for d0 in dir_names:
