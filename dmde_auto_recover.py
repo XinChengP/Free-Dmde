@@ -961,6 +961,10 @@ class DMDE:
         if fstate.get('done'):
             r.log('文件已恢复过, 跳过标记: %s (子目录 %d)' % (relpath or '(起始目录)', len(dir_names)))
         else:
+            # 本目录文件是否含已删除项 (属性列 x) -> 需要勾选"已删除"类别
+            d.need_deleted = any('x' in (subs[3] or '').lower()
+                                 for idx, name, st, img, subs in rows
+                                 if not name.startswith('[..]') and idx in file_rows)
             dest = os.path.join(r.out_root, relpath) if relpath else r.out_root
             t0f = time.time()
             r.log('目录 %r: 文件 %d, 子目录 %d' % (relpath or '(起始目录)', len(file_rows), len(dir_names)))
