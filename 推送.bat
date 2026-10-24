@@ -30,14 +30,14 @@ if not defined TOKEN (
 set API=https://api.github.com
 
 rem ===== create repo (422 = already exists, ok) =====
-echo [i] Creating repo CayJir/freedmde if missing...
+echo [i] Creating repo XinChengP/Free-Dmde if missing...
 curl -s !CURLARGS! -H "Authorization: token !TOKEN!" -H "Accept: application/vnd.github+json" ^
   %API%/user/repos -d "{\"name\":\"freedmde\",\"description\":\"DMDE free-edition batch recovery: per-folder recovery with original relative paths, GUI, resume, folder filter, trial mode\",\"private\":false}" -o "%TEMP%\repocreate.json"
 powershell -NoProfile -Command "$j=Get-Content '%TEMP%\repocreate.json' -Raw | ConvertFrom-Json; if($j.html_url){Write-Output ('[i] repo: '+$j.html_url)} elseif($j.message){Write-Output ('[i] api: '+$j.message)}"
 
 rem ===== push =====
 git remote get-url origin >nul 2>&1
-if %errorlevel% neq 0 git remote add origin https://github.com/CayJir/freedmde.git
+if %errorlevel% neq 0 git remote add origin https://github.com/XinChengP/Free-Dmde.git
 
 if defined PROXY (
     git -c http.proxy=!PROXY! push -u origin main
@@ -46,7 +46,7 @@ if defined PROXY (
 )
 if %errorlevel% equ 0 (
     echo.
-    echo [OK] Published: https://github.com/CayJir/freedmde
+    echo [OK] Published: https://github.com/XinChengP/Free-Dmde
 ) else (
     echo.
     echo [x] Push failed. Turn on your proxy/VPN and run this again.
