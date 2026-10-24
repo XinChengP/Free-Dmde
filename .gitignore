@@ -27,3 +27,4 @@ __pycache__/
 tools/*
 !tools/mkfat32.py
 !tools/verify_e2e.py
+!tools/exfat_recover.py
