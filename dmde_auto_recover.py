@@ -518,7 +518,7 @@ class DMDE:
         rows, right = self.rows()
         dirs = []
         for idx, name, st, img, _s in rows:
-            if name.startswith('[..]'):
+            if name.startswith('[..]') or not name.strip():
                 continue
             if self.is_dir_row(right, idx, name, img):
                 dirs.append(name)
@@ -939,10 +939,10 @@ class DMDE:
         fstate = r.state['folders'].setdefault(relpath, {'done': False, 'rows_done': 0})
         rows, right = self.wait_stable()
         file_rows, dir_names = [], []
-        for idx, name, st, img, _s in rows:
-            if name.startswith('[..]'):
+        for idx, name, st, img, subs in rows:
+            if name.startswith('[..]') or not name.strip():
                 continue
-            if self.is_dir_row(right, idx, name, img):
+            if self.is_dir_row(right, idx, name, img, v1=(subs[0] if subs else None)):
                 dir_names.append(name)
             else:
                 file_rows.append(idx)
