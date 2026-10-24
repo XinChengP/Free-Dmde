@@ -1053,6 +1053,11 @@ class DMDE:
             if self.subtree_done(sub):
                 r.log('跳过(子树已完成): %s' % sub)
                 continue
+            # 祖先同名保护: 重建视图可能出现 004/004/004 式伪循环
+            ancestors = set(relpath.split(os.sep)) if relpath else set()
+            if name in ancestors:
+                r.log('跳过(与上级目录同名, 疑似重建视图伪循环): %s' % sub)
+                continue
             try:
                 if tree_ok and self.tree_nav(name):
                     self.process_folder(sub, depth + 1, start=False)
