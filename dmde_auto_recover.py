@@ -223,6 +223,14 @@ class DMDE:
             texts = self.static_texts(w)
             self.r.log('弹窗: %r 文本=%r 按钮=%r' % (title, texts[:5], list(btns)[:6]))
 
+            # 0) 恢复对话框本体: 只能由 run_recovery 处理, pump 绝不能动它
+            try:
+                if RE_RD_TITLE.fullmatch(w.window_text() or ''):
+                    self.r.log('  -> 恢复对话框等待处理...')
+                    time.sleep(0.8)
+                    continue
+            except Exception:
+                pass
             hit = False
             # 1) 免费版激活提示
             for t, b in btns.items():
@@ -329,16 +337,24 @@ class DMDE:
 
     # ---------------- 面板 ----------------
     def lists(self):
+        """识别左树/右文件列表 — 按相对主窗口的位置比例, 与窗口摆放位置无关。"""
         left = right = None
+        try:
+            mrect = self.main.rectangle()
+            mw = max(mrect.width(), 1)
+        except Exception:
+            return None, None
         for c in self.main.descendants(class_name='SysListView32'):
             try:
                 if not c.is_visible() or c.item_count() == 0:
                     continue
                 rc = c.rectangle()
-                if rc.left < 500 and (rc.right - rc.left) < 520:
+                rel_left = (rc.left - mrect.left) / mw
+                rel_width = (rc.right - rc.left) / mw
+                if rel_left < 0.30 and rel_width < 0.45:
                     if left is None:
                         left = c
-                elif rc.left >= 500:
+                elif rel_left >= 0.30:
                     if right is None or c.item_count() >= right.item_count():
                         right = c
             except Exception:
@@ -705,9 +721,23 @@ class DMDE:
             try:
                 if w is not None and w.class_name() == '#32770' \
                         and RE_RD_TITLE.fullmatch(w.window_text() or ''):
-                    w.child_window(control_id=1, class_name='Button').click_input()
-                    self.r.log('  -> 重新点击 Recover (受限面板恢复)')
-                    time.sleep(0.8)
+                    # 重新弹出的恢复对话框: 按钮可能短暂禁用/窗口可能重建,
+                    # 每次尝试都重新抓取 top window, 避免旧引用空转
+                    clicked = False
+                    for _ in range(20):
+                        try:
+                            w2 = self.top()
+                            b = w2.child_window(control_id=1, class_name='Button')
+                            if b.exists(timeout=0.5) and b.is_enabled() and b.is_visible():
+                                b.click_input()
+                                clicked = True
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(0.3)
+                    self.r.log('  -> 重新点击 Recover (受限面板恢复)' if clicked
+                               else '  -> Recover 按钮暂不可用, 稍后重试')
+                    time.sleep(0.6)
                     continue
             except Exception:
                 pass
@@ -790,6 +820,7 @@ class DMDE:
         before_names = set(n for _, n, _, _, _ in before_rows)
         before_count = len(before_rows)
         try:
+            left.item(idx).ensure_visible()
             left.item(idx).click_input()
         except Exception:
             return False
@@ -801,6 +832,7 @@ class DMDE:
         if (cf and name in cf) or right.item_count() != before_count or names != before_names:
             return True
         try:
+            left.item(idx).ensure_visible()
             left.item(idx).click_input()
         except Exception:
             return False
@@ -811,8 +843,59 @@ class DMDE:
         cf = self.current_folder()
         return bool((cf and name in cf) or right.item_count() != before_count or names != before_names)
 
+    def _count_direct_files(self, dest):
+        try:
+            return sum(1 for e in os.scandir(dest) if e.is_file())
+        except Exception:
+            return 0
+
+    def _recover_folder_files(self, file_rows, dest, fstate, relpath):
+        """对 file_rows 分批标记并恢复 (断点推进在此处)。"""
+        r = self.r
+        chunk = r.args.chunk
+        while fstate.get('rows_done', 0) < len(file_rows):
+            if r.cancelled():
+                raise Cancelled('用户停止 (断点已保存)')
+            mb = getattr(r.args, 'max_batches', 0) or 0
+            if mb and r.stats['batches'] >= mb:
+                raise Cancelled('训练模式: 已完成 %d 批, 自动停止 (断点已保存, 取消限制可继续)' % mb)
+            start = fstate.get('rows_done', 0)
+            if start > 0:
+                self.unmark_all()   # 只有续传到一半才可能有残留标记
+            cnt = min(chunk, len(file_rows) - start)
+            marked = self.mark_file_rows(file_rows, start, cnt)
+            if not marked:
+                raise RuntimeError('第 %d 批标记失败 (目录 %r)' % (start // chunk + 1, relpath))
+            if len(marked) != cnt:
+                raise RuntimeError(
+                    '标记数不符: 目标 %d 实际 %d (目录 %r)。'
+                    '运行期间可能有其他窗口/人为操作干扰了鼠标键盘, 请重试。'
+                    % (cnt, len(marked), relpath))
+            r.log('已标记 %d 个文件, 开始第 %d 批恢复' % (len(marked), start // chunk + 1))
+            r.progress.update({'phase': '恢复中', 'folder': relpath or '(起始目录)',
+                               'batch_files': len(marked)})
+            stats = self.run_recovery(dest)
+            fstate['rows_done'] = start + len(marked)
+            r.stats['files'] += len(marked)
+            r.stats['batches'] += 1
+            r.progress.update({'files': r.stats['files'], 'batches': r.stats['batches'],
+                               'folder': relpath or '(起始目录)', 'phase': '已恢复一批'})
+            r.save_state()
+            r.log('第 %d 批完成: %s' % (start // chunk + 1, (stats or '')[:120]))
+
     def process_folder(self, relpath, depth=0, start=True):
         r = self.r
+        # 循环/超深保护: 损坏盘的重建视图可能出现虚拟环路 (objects/*/*/*...)
+        if not hasattr(self, '_visited'):
+            self._visited = set()
+        if relpath:
+            if relpath in self._visited:
+                r.log('跳过(已访问过, 疑似重建视图虚拟环路): %s' % relpath[:100])
+                return
+            self._visited.add(relpath)
+            if len(relpath) > 160 or depth > 22:
+                r.log('跳过(路径过深/过长, 疑似重建视图伪循环): %s' % relpath[:100])
+                return
         fstate = r.state['folders'].setdefault(relpath, {'done': False, 'rows_done': 0})
         rows, right = self.wait_stable()
         file_rows, dir_names = [], []
@@ -844,36 +927,16 @@ class DMDE:
 
             if file_rows and not r.args.list_only:
                 os.makedirs(dest, exist_ok=True)
-                chunk = r.args.chunk
-                while fstate.get('rows_done', 0) < len(file_rows):
-                    if r.cancelled():
-                        raise Cancelled('用户停止 (断点已保存)')
-                    mb = getattr(r.args, 'max_batches', 0) or 0
-                    if mb and r.stats['batches'] >= mb:
-                        raise Cancelled('训练模式: 已完成 %d 批, 自动停止 (断点已保存, 取消限制可继续)' % mb)
-                    start = fstate.get('rows_done', 0)
-                    if start > 0:
-                        self.unmark_all()   # 只有续传到一半才可能有残留标记
-                    cnt = min(chunk, len(file_rows) - start)
-                    marked = self.mark_file_rows(file_rows, start, cnt)
-                    if not marked:
-                        raise RuntimeError('第 %d 批标记失败 (目录 %r)' % (start // chunk + 1, relpath))
-                    if len(marked) != cnt:
-                        raise RuntimeError(
-                            '标记数不符: 目标 %d 实际 %d (目录 %r)。'
-                            '运行期间可能有其他窗口/人为操作干扰了鼠标键盘, 请重试。'
-                            % (cnt, len(marked), relpath))
-                    r.log('已标记 %d 个文件, 开始第 %d 批恢复' % (len(marked), start // chunk + 1))
-                    r.progress.update({'phase': '恢复中', 'folder': relpath or '(起始目录)',
-                                       'batch_files': len(marked)})
-                    stats = self.run_recovery(dest)
-                    fstate['rows_done'] = start + len(marked)
-                    r.stats['files'] += len(marked)
-                    r.stats['batches'] += 1
-                    r.progress.update({'files': r.stats['files'], 'batches': r.stats['batches'],
-                                       'folder': relpath or '(起始目录)', 'phase': '已恢复一批'})
+                self._recover_folder_files(file_rows, dest, fstate, relpath)
+                # 自愈: 磁盘直连文件数 < 面板文件数 => 有批次曾被中止, 重做一次
+                direct = self._count_direct_files(dest)
+                if direct < len(file_rows) and not fstate.get('retried'):
+                    fstate['retried'] = True
+                    fstate['rows_done'] = 0
                     r.save_state()
-                    r.log('第 %d 批完成: %s' % (start // chunk + 1, (stats or '')[:120]))
+                    r.log('警告: 磁盘文件数(%d) < 面板文件数(%d), 自动重做本目录 (重名文件自动跳过)'
+                          % (direct, len(file_rows)))
+                    self._recover_folder_files(file_rows, dest, fstate, relpath)
             elif file_rows:
                 r.log('  (list-only) 将恢复 %d 个文件 -> %s' % (len(file_rows), dest))
                 for d0 in dir_names:
@@ -886,6 +949,9 @@ class DMDE:
         for name in dir_names:
             sub = name if not relpath else relpath + os.sep + name
             sub_dest = os.path.join(r.out_root, sub)
+            if len(sub_dest) > 200:
+                r.log('跳过(输出路径过长, 疑似伪循环): %s' % sub[:100])
+                continue
             os.makedirs(sub_dest, exist_ok=True)
             if r.args.list_only:
                 r.log('(list-only) 子目录: %s' % sub)
@@ -893,41 +959,69 @@ class DMDE:
             if self.subtree_done(sub):
                 r.log('跳过(子树已完成): %s' % sub)
                 continue
-            if tree_ok and self.tree_nav(name):
-                self.process_folder(sub, depth + 1, start=False)
-                continue
-            if tree_ok:
-                tree_ok = False
-                r.log('树导航不可用, 回退为面板双击导航')
-                rows, right = self.goto_parent()
-            idx = None
-            for attempt in range(5):
-                rows, right = self.rows()
-                for i2, n2, st2, im2, _s2 in rows:
-                    if n2 == name:
-                        idx = i2
+            try:
+                if tree_ok and self.tree_nav(name):
+                    self.process_folder(sub, depth + 1, start=False)
+                    continue
+                if tree_ok:
+                    tree_ok = False
+                    r.log('树导航不可用, 回退为面板双击导航')
+                # 树点击可能已进入 name 但验证失败: 此时 current_folder 显示 name
+                cf = self.current_folder()
+                if cf and name in cf:
+                    self.process_folder(sub, depth + 1, start=False)
+                    rows, right = self.goto_parent()
+                    names = set(n for _, n, _, _, _ in rows)
+                    for _ in range(2):
+                        if name in names:
+                            break
+                        self.pump(max_rounds=2)
+                        rows, right = self.goto_parent()
+                        names = set(n for _, n, _, _, _ in rows)
+                    continue
+                idx = None
+                for attempt in range(5):
+                    rows, right = self.rows()
+                    for i2, n2, st2, im2, _s2 in rows:
+                        if n2 == name:
+                            idx = i2
+                            break
+                    if idx is not None:
                         break
-                if idx is not None:
-                    break
-                # 行不见了: 可能虚拟视图在后台重建, 等待后重读
-                self.r.log('子目录行 %r 暂未找到 (第 %d 次), 等待视图重建...' % (name, attempt + 1))
-                time.sleep(3)
-                self.pump(max_rounds=3)
-            if idx is None:
-                r.log('警告: 找不到子目录行 %r, 跳过' % name)
-                continue
-            self.dblclick_row(right, idx, name)
-            self.process_folder(sub, depth + 1, start=False)
-            rows, right = self.goto_parent()
-            names = set(n for _, n, _, _, _ in rows)
-            for _ in range(3):
-                if name in names:
-                    break
-                self.pump(max_rounds=3)
+                    # 行不见了: 可能虚拟视图在后台重建, 等待后重读
+                    self.r.log('子目录行 %r 暂未找到 (第 %d 次), 等待视图重建...' % (name, attempt + 1))
+                    time.sleep(3)
+                    self.pump(max_rounds=3)
+                if idx is None:
+                    r.log('警告: 找不到子目录行 %r, 跳过' % name)
+                    continue
+                self.dblclick_row(right, idx, name)
+                self.process_folder(sub, depth + 1, start=False)
                 rows, right = self.goto_parent()
                 names = set(n for _, n, _, _, _ in rows)
-            if name not in names:
-                raise RuntimeError('返回上级失败: %s <- %s' % (relpath, sub))
+                for _ in range(3):
+                    if name in names:
+                        break
+                    self.pump(max_rounds=3)
+                    rows, right = self.goto_parent()
+                    names = set(n for _, n, _, _, _ in rows)
+                if name not in names:
+                    raise RuntimeError('返回上级失败: %s <- %s' % (relpath, sub))
+            except Cancelled:
+                raise
+            except SystemExit:
+                raise
+            except Exception as e:
+                r.log('警告: 处理子目录 %r 时出错, 跳过: %s' % (name, e))
+                # 尝试回到本目录, 保证后续兄弟分支继续
+                try:
+                    cf = self.current_folder()
+                    if cf and name in cf:
+                        pass   # 已在本目录内(未进入成功), 继续
+                    else:
+                        rows, right = self.goto_parent()
+                except Exception:
+                    pass
                 raise RuntimeError('返回上级失败: %s <- %s' % (relpath, sub))
         if filtered:
             fstate['children'] = dir_names
@@ -983,23 +1077,37 @@ def run(args, log_cb=None, cancel=None, progress=None):
 
     # 回到 $Root, 使续传起点确定 (面板可能停在子目录)
     if getattr(args, 'goto_root', False) and not args.root:
+        ok = False
         try:
             left, _ = d.lists()
-            done = False
             if left is not None:
+                node = None
                 for i in range(left.item_count()):
                     it = left.item(i)
                     if (it['text'] or '').startswith('$Root'):
-                        it.click_input(double=True)
-                        time.sleep(2)
-                        d.pump(max_rounds=2)
-                        done = True
+                        node = it
                         break
-            if done:
-                rows, right = d.wait_stable()
-                r.log('已回到 $Root (%d 行)' % len(rows))
+                if node is not None:
+                    for attempt in range(3):
+                        try:
+                            node.ensure_visible()
+                            node.click_input(double=True)
+                        except Exception:
+                            pass
+                        time.sleep(1.5)
+                        d.pump(max_rounds=2)
+                        cf = d.current_folder()
+                        if cf and '$root' in cf.lower():
+                            ok = True
+                            break
         except Exception as e:
-            r.log('回到 $Root 失败 (从当前位置继续): %s' % e)
+            r.log('回到 $Root 异常: %s' % e)
+        if ok:
+            rows, right = d.wait_stable()
+            r.log('已回到 $Root (%d 行)' % len(rows))
+        else:
+            raise SystemExit('无法自动回到 $Root (树点击无效)。'
+                             '请手动在 DMDE 左侧树双击 $Root, 再点开始。')
 
     if args.root:
         idx = None
