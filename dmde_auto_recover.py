@@ -26,6 +26,7 @@ dmde_auto_recover.py — DMDE 免费版自动恢复脚本（按原相对路径�
 依赖: pip install pywinauto
 """
 import argparse
+import ctypes
 import json
 import os
 import re
