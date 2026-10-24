@@ -421,11 +421,13 @@ class DMDE:
                 txt = txt.split(chr(0), 1)[0]
                 return txt, filled.state, filled.iImage
 
+            attr_off = 6144       # 属性列文本偏移
             out = []
             for i in range(n):
                 name, state, img = read_item(i, 0, base + text_off)
                 v1 = read_item(i, 1, base + size_off)[0]
-                out.append((i, name, state, img, [v1, '', '', '']))
+                v4 = read_item(i, 4, base + attr_off)[0]
+                out.append((i, name, state, img, [v1, '', '', v4]))
             return out
         finally:
             if base:
@@ -459,12 +461,16 @@ class DMDE:
                 img = it['image']
             except Exception:
                 pass
-            v1 = ''
+            v1 = v4 = ''
             try:
                 v1 = right.item(i, 1).text()
             except Exception:
                 pass
-            subs = [v1, '', '', '']
+            try:
+                v4 = right.item(i, 4).text()
+            except Exception:
+                pass
+            subs = [v1, '', '', v4]
             if self.debug:
                 for s in range(1, 5):
                     try:
@@ -712,26 +718,39 @@ class DMDE:
             raise RuntimeError('目标路径设置失败')
 
     def ensure_deleted_category(self, dlg):
-        """在恢复对话框中勾选"已删除"类别 (损坏盘恢复必需)。仅在能可靠读取状态时操作。"""
+        """若本批标记的文件含已删除项(属性 x), 点击"已删除"类别标签 (会话内一次)。"""
+        if not getattr(self, 'need_deleted', False):
+            return
+        if getattr(self, '_deleted_clicked', False):
+            return
         try:
             for b in dlg.descendants(class_name='Button'):
                 t = b.window_text() or ''
-                if t in ('已删除', 'deleted', '已删除文件'):
-                    style = ctypes.windll.user32.GetWindowLongW(b.handle, 0xFFF0) & 0xF
-                    if style not in (0x2, 0x6, 0x9, 0x10):   # 非标准复选框 -> 不碰
-                        self.r.log('  类别"已删除"为自绘控件, 跳过自动勾选 (请手动确认)')
-                        return
-                    st = b.get_check_state()
-                    if st in (0, None):
-                        b.click_input()
-                        self.r.log('  -> 已勾选类别"已删除"')
-                    else:
-                        self.r.log('  类别"已删除"已勾选')
+                if t in ('已删除', 'deleted'):
+                    b.click_input()
+                    self._deleted_clicked = True
+                    self.r.log('  -> 已点击类别"已删除" (恢复已删除文件)')
+                    time.sleep(0.4)
                     return
+            self.r.log('  未找到"已删除"类别控件')
         except Exception as e:
-            self.r.log('  勾选"已删除"失败 (忽略): %s' % e)
+            self.r.log('  点击"已删除"失败 (忽略): %s' % e)
 
-    def run_recovery(self, dest):
+    def _row_marked(self, right, i):
+        """用 SendMessageTimeout 读第 i 行的标记位 (恢复期间 DMDE 忙也能安全调用)。"""
+        import ctypes
+        user32 = ctypes.windll.user32
+        LVM_GETITEMSTATE = 0x102C
+        SMTO_ABORTIFHUNG = 0x0002
+        res = ctypes.c_uint(0)
+        ok = user32.SendMessageTimeoutW(right.handle, LVM_GETITEMSTATE, i,
+                                        0xF000, SMTO_ABORTIFHUNG, 800,
+                                        ctypes.byref(res))
+        if not ok:
+            return None
+        return bool(res.value & 0xC000)
+
+    def run_recovery(self, dest, target_idxs=None, right=None):
         rd = self.open_recover_dialog()
         self.set_destination(rd, dest)
         self.ensure_deleted_category(rd)
@@ -741,6 +760,7 @@ class DMDE:
         t0 = time.time()
         last_min = -1
         stop_note = False
+        quiet_done = 0
         while time.time() - t0 < 7200:
             if self.r.cancelled() and not stop_note:
                 stop_note = True
@@ -772,15 +792,41 @@ class DMDE:
             except Exception:
                 pass
             if w is None or not self.is_popup(w):
-                break
+                # 无弹窗: 判定恢复是否完成
+                # 可靠信号: 目标行标记已被 DMDE 清空 (恢复完成后自动清标记)
+                if target_idxs and right is not None:
+                    try:
+                        sample = target_idxs[:10]
+                        sts = [self._row_marked(right, i) for i in sample]
+                        sts = [x for x in sts if x is not None]
+                        if sts and not any(sts):
+                            self.r.log('  -> 标记已清空, 恢复完成 (%.1f 秒)' % (time.time() - t0))
+                            break
+                    except Exception:
+                        pass
+                # 兜底: 连续无弹窗 (~1.6 秒) 视为完成
+                quiet_done += 1
+                if quiet_done >= 4:
+                    break
+                time.sleep(0.4)
+                continue
+            quiet_done = 0
             st = self.pump(max_rounds=10, timeout_s=60)
             if st:
                 stats = st
-            time.sleep(0.4)
+            time.sleep(0.3)
             mn = int(time.time() - t0) // 60
             if mn > last_min and mn > 0:
                 last_min = mn
                 self.r.log('  ...恢复中 (%d 分钟)' % mn)
+        # 吞掉完成统计框 (若有)
+        time.sleep(0.8)
+        try:
+            w = self.top()
+            if w is not None and self.is_popup(w):
+                self.pump(max_rounds=4)
+        except Exception:
+            pass
         return stats
 
     # ---------------- 遍历 ----------------
@@ -886,11 +932,15 @@ class DMDE:
         while True:
             rows, right = self.rows()
             file_rows = []
+            need_del = False
             for idx, name, st, img, subs in rows:
-                if name.startswith('[..]'):
+                if name.startswith('[..]') or not name.strip():
                     continue
                 if not self.is_dir_row(right, idx, name, img, v1=(subs[0] if subs else None)):
                     file_rows.append(idx)
+                    if 'x' in (subs[3] or '').lower():
+                        need_del = True
+            self.need_deleted = need_del
             done_n = fstate.get('rows_done', 0)
             if done_n >= len(file_rows):
                 break
@@ -914,7 +964,7 @@ class DMDE:
             r.log('已标记 %d 个文件, 开始第 %d 批恢复' % (len(marked), start // chunk + 1))
             r.progress.update({'phase': '恢复中', 'folder': relpath or '(起始目录)',
                                'batch_files': len(marked)})
-            stats = self.run_recovery(dest)
+            stats = self.run_recovery(dest, target_idxs=marked, right=right)
             fstate['rows_done'] = start + len(marked)
             r.stats['files'] += len(marked)
             r.stats['batches'] += 1
