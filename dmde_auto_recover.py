@@ -988,12 +988,13 @@ class DMDE:
                 return
         fstate = r.state['folders'].setdefault(relpath, {'done': False, 'rows_done': 0})
         rows, right = self.wait_stable()
-        file_rows, dir_names = [], []
+        file_rows, dir_names, dir_names_all = [], [], []
         for idx, name, st, img, subs in rows:
             if name.startswith('[..]') or not name.strip():
                 continue
             if self.is_dir_row(right, idx, name, img, v1=(subs[0] if subs else None)):
                 dir_names.append(name)
+                dir_names_all.append(name)
             else:
                 file_rows.append(idx)
 
@@ -1003,10 +1004,16 @@ class DMDE:
         if start and only:
             before = len(dir_names)
             dir_names = [d for d in dir_names if d in only]
-            file_rows = []
             filtered = True
             r.log('限定恢复文件夹: %r (面板子目录 %d -> 选中 %d, 起始目录下的文件不恢复)'
                   % (only, before, len(dir_names)))
+            if before and not dir_names:
+                raise SystemExit(
+                    '限定的文件夹在当前面板中一个都未匹配到。'
+                    '面板子目录: %r / 限定: %r。'
+                    '常见原因: 勾选了"开始前回到 $Root", 但选择是从某个子文件夹层级读取的。'
+                    '解决: 取消勾选"开始前回到 $Root"后再开始, 或在 DMDE 中回到对应层级。'
+                    % (sorted(dir_names_all)[:8], sorted(only)[:8]))
 
         if fstate.get('done'):
             r.log('文件已恢复过, 跳过标记: %s (子目录 %d)' % (relpath or '(起始目录)', len(dir_names)))

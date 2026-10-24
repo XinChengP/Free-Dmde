@@ -211,8 +211,8 @@ class FolderSelectDialog(tk.Toplevel):
         self._fetch = fetch
         self._q = queue.Queue()
 
-        ttk.Label(self, text='勾选要恢复的文件夹 (读取自 DMDE 当前面板):').pack(
-            anchor='w', padx=8, pady=(8, 2))
+        self.ctx_label = ttk.Label(self, text='勾选要恢复的文件夹 (读取自 DMDE 当前面板):')
+        self.ctx_label.pack(anchor='w', padx=8, pady=(8, 2))
         frame = ttk.Frame(self)
         frame.pack(fill='both', expand=True, padx=8)
         self.listbox = tk.Listbox(frame, selectmode='extended',
@@ -257,9 +257,12 @@ class FolderSelectDialog(tk.Toplevel):
             while True:
                 kind, data = self._q.get_nowait()
                 if kind == 'ok':
-                    for name in data:
+                    dirs, cf = data
+                    for name in dirs:
                         self.listbox.insert('end', name)
-                    self.status.configure(text='共 %d 个文件夹, 按住 Ctrl/Shift 多选后点确定' % len(data))
+                    self.ctx_label.configure(
+                        text='读取层级: %s — 选择的文件夹必须是这一层级里的' % cf)
+                    self.status.configure(text='共 %d 个文件夹, 按住 Ctrl/Shift 多选后点确定' % len(dirs))
                 else:
                     self.status.configure(text='读取失败: %s' % data)
         except queue.Empty:
@@ -471,11 +474,19 @@ class App(tk.Tk):
             w = d.top()
             if w is not None and d.is_popup(w):
                 d.pump(max_rounds=3)
-            return d.read_panel_dirs()
+            cf = d.current_folder() or '(当前面板)'
+            dirs = d.read_panel_dirs()
+            return dirs, cf
 
         dlg = FolderSelectDialog(self, fetch)
         if dlg.result:
             self.only_var.set(', '.join(dlg.result))
+            # 选择的文件夹来自 DMDE 当前面板层级, 开始时不能跳回 $Root
+            self.goto_root_var.set(False)
+            messagebox.showinfo(
+                '已限定 %d 个文件夹' % len(dlg.result),
+                '已取消勾选"开始前回到 $Root" (选择来自 DMDE 当前面板层级)。'
+                '如果之后想恢复全部, 请点"清除"并重新勾选"开始前回到 $Root"。')
 
     def start(self):
         if self.worker and self.worker.is_alive():
